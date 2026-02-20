@@ -57,6 +57,13 @@ import {
 import { gcalEventToFCEvent, fcEventToGCalEvent, mergeGCalDataToFCEvent, findCalendarForEvent } from "../util/gcalMapping";
 import { saveSyncMetadata, createSyncMetadata, getSyncMetadata, updateSyncMetadata, getRoamUidByGCalId, determineSyncStatus, SyncStatus } from "../models/SyncMetadata";
 import { applyGCalToRoamUpdate, syncEventToGCal } from "../services/syncService";
+import {
+  isOutlookAuthenticated,
+  getOutlookConnectedCalendars,
+} from "../services/outlookCalendarService";
+import { outlookEventToFCEvent } from "../util/outlookMapping";
+import { getOutlookSyncMetadata, getRoamUidByOutlookId } from "../models/OutlookSyncMetadata";
+import { fetchOutlookEventsForRange } from "../services/outlookSyncService";
 // import { recoverLostSyncs, isSafeToAutoSync } from "../services/syncRecoveryService"; // Commented out with sync recovery
 // import { deduplicateAllEvents, shouldRunAutoDeduplication, markDeduplicationRun } from "../services/deduplicationService"; // Commented out with auto-dedup
 import { areEventsDuplicate } from "../services/deduplicationService";
@@ -1047,6 +1054,58 @@ const Calendar = ({
             } catch (error) {
               console.error(`[Tasks] Failed to fetch tasks from "${listConfig.name}":`, error);
             }
+          }
+        }
+      }
+
+      // Load events from all connected Outlook Calendars
+      if (isOutlookAuthenticated()) {
+        const outlookCalendars = getOutlookConnectedCalendars();
+        const enabledOutlookCalendars = outlookCalendars.filter(
+          (c) => c.syncEnabled && c.syncDirection !== "export"
+        );
+
+        for (const calendarConfig of enabledOutlookCalendars) {
+          if (!isMountedRef.current) break;
+
+          try {
+            const outlookFCEvents = await fetchOutlookEventsForRange(
+              calendarConfig.id,
+              info.start,
+              info.end,
+              calendarConfig
+            );
+
+            if (!isMountedRef.current) break;
+
+            if (outlookFCEvents && outlookFCEvents.length) {
+              // Build lookup for O(1) by Outlook ID
+              const eventIndexByOutlookId = new Map();
+              for (let i = 0; i < events.length; i++) {
+                const outlookId = events[i].extendedProps?.outlookId;
+                if (outlookId) {
+                  eventIndexByOutlookId.set(outlookId, i);
+                }
+              }
+
+              for (const fcEvent of outlookFCEvents) {
+                const outlookId = fcEvent.extendedProps?.outlookId;
+                const existingIndex = eventIndexByOutlookId.has(outlookId)
+                  ? eventIndexByOutlookId.get(outlookId)
+                  : -1;
+
+                if (existingIndex === -1) {
+                  // Not yet in view - check if linked to a Roam block
+                  const linkedRoamUid = getRoamUidByOutlookId(outlookId);
+                  if (!linkedRoamUid) {
+                    // No linked Roam block - add as Outlook-only event
+                    events.push(fcEvent);
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            console.error(`[Outlook] Failed to fetch events from ${calendarConfig.name}:`, error);
           }
         }
       }

@@ -44,6 +44,7 @@ import TagList from "./TagList";
 import DeleteDialog from "./DeleteDialog";
 import LinkConfirmDialog from "./LinkConfirmDialog";
 import GCalEventInfo from "./GCalEventInfo";
+import OutlookEventInfo from "./OutlookEventInfo";
 import { getTimestampFromHM, getFormatedRange, parseRange, getNormalizedTimestamp, dateToISOString, strictTimestampRegex } from "../util/dates";
 import {
   getConnectedCalendars,
@@ -93,6 +94,8 @@ import {
 import GoogleCalendarIconSvg from "../services/google-calendar.svg";
 // Google Tasks icon for unimported task events
 import GoogleTasksIconSvg from "../services/google-task-logo.svg";
+// Outlook Calendar icon for unimported Outlook events
+import OutlookCalendarIconSvg from "../services/outlook-calendar.svg";
 
 const Event = ({
   displayTitle,
@@ -131,6 +134,9 @@ const Event = ({
 
   // Check if this is a Google Task event (not imported to Roam)
   const isGTaskEvent = event.extendedProps?.isGTaskEvent === true;
+
+  // Check if this is an Outlook Calendar event (not imported to Roam)
+  const isOutlookEvent = event.extendedProps?.isOutlookEvent === true;
 
   // Check if this Roam event is synced to GCal
   const isSyncedToGCal =
@@ -1071,8 +1077,8 @@ const Event = ({
   };
 
   const handleClose = async () => {
-    // Skip Roam-specific close handling for GCal/GTask events
-    if (isGCalEvent || isGTaskEvent) return;
+    // Skip Roam-specific close handling for GCal/GTask/Outlook events
+    if (isGCalEvent || isGTaskEvent || isOutlookEvent) return;
 
     const updatedContent = event.extendedProps.hasInfosInChildren
       ? getFlattenedContentOfParentAndFirstChildren(event.id)
@@ -1218,7 +1224,82 @@ const Event = ({
                   </span>
                 </div>
               )}
-            {isGCalEvent || isGTaskEvent ? (
+            {isOutlookEvent ? (
+              // Outlook Calendar event details
+              <div className="fc-outlook-event-details">
+                <h4>{event.title || "(No title)"}</h4>
+                <div className="fc-gcal-time">
+                  <Icon icon="time" size={12} />
+                  <span>
+                    {event.extendedProps?.hasTime ? (
+                      <>
+                        {new Date(event.start).toLocaleString(undefined, {
+                          weekday: "short",
+                          month: "short",
+                          day: "numeric",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                        {event.end && (
+                          <>
+                            {" - "}
+                            {new Date(event.end).toLocaleTimeString(undefined, {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </>
+                        )}
+                      </>
+                    ) : (
+                      new Date(event.start).toLocaleDateString(undefined, {
+                        weekday: "short",
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                      })
+                    )}
+                  </span>
+                </div>
+                <OutlookEventInfo
+                  calendarName={event.extendedProps?.outlookCalendarName}
+                  location={event.extendedProps?.location}
+                  attendees={event.extendedProps?.outlookEventData?.attendees}
+                  description={event.extendedProps?.description}
+                  webLink={event.extendedProps?.outlookEventData?.webLink}
+                  showClickableCalendar={true}
+                  onCalendarClick={(e) => {
+                    e.stopPropagation();
+                    if (event.extendedProps?.outlookEventData?.webLink) {
+                      window.open(
+                        event.extendedProps.outlookEventData.webLink,
+                        "_blank"
+                      );
+                    }
+                  }}
+                />
+                <div className="fc-gcal-actions">
+                  {event.extendedProps?.outlookEventData?.webLink && (
+                    <Button
+                      small
+                      icon="share"
+                      onClick={() =>
+                        window.open(
+                          event.extendedProps.outlookEventData.webLink,
+                          "_blank"
+                        )
+                      }
+                    >
+                      Open in Outlook
+                    </Button>
+                  )}
+                </div>
+                <div className="fc-gcal-tag">
+                  <Tag minimal>
+                    {eventTagList?.[0]?.name || "Outlook Calendar"}
+                  </Tag>
+                </div>
+              </div>
+            ) : isGCalEvent || isGTaskEvent ? (
               // Google Calendar/Task event details
               <div className="fc-gcal-event-details">
                 <div className="fc-gcal-title-row">
@@ -1696,8 +1777,8 @@ const Event = ({
         onClose={handleClose}
         usePortal={true}
         onOpening={(e) => {
-          // Skip Roam block rendering for GCal/GTask events
-          if (isGCalEvent || isGTaskEvent) return;
+          // Skip Roam block rendering for GCal/GTask/Outlook events
+          if (isGCalEvent || isGTaskEvent || isOutlookEvent) return;
 
           window.roamAlphaAPI.ui.components.renderBlock({
             uid: event.id,
@@ -1721,7 +1802,7 @@ const Event = ({
             setPopoverIsOpen((prev) => !prev);
           }}
         >
-          {hasCheckbox && !isGCalEvent && !isGTaskEvent && (
+          {hasCheckbox && !isGCalEvent && !isGTaskEvent && !isOutlookEvent && (
             <Checkbox
               checked={isChecked}
               // onClick={(e) => {}}
@@ -1926,6 +2007,15 @@ const Event = ({
                     <span>{event.extendedProps.gTaskListName}</span>
                   </div>
                 )}
+                {isOutlookEvent && event.extendedProps?.outlookCalendarName && (
+                  <div className="fc-gcal-calendar-hint">
+                    <OutlookCalendarIconSvg
+                      className="fc-outlook-icon-small"
+                      style={{ width: "16px", height: "16px" }}
+                    />
+                    <span>{event.extendedProps.outlookCalendarName}</span>
+                  </div>
+                )}
                 {isSyncedToGCal && (
                   <div className="fc-sync-status">
                     <Icon icon="automatic-updates" size={12} />
@@ -1958,6 +2048,12 @@ const Event = ({
               {isGTaskEvent && (
                 <GoogleTasksIconSvg
                   className="fc-gcal-icon-inline"
+                  style={{ width: "12px", height: "12px", marginRight: "4px" }}
+                />
+              )}
+              {isOutlookEvent && (
+                <OutlookCalendarIconSvg
+                  className="fc-outlook-icon-inline"
                   style={{ width: "12px", height: "12px", marginRight: "4px" }}
                 />
               )}
