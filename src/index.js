@@ -47,6 +47,7 @@ import {
   showOutlookSyncResultToast,
 } from "./services/outlookSyncService";
 import { cleanupOldOutlookMetadata } from "./models/OutlookSyncMetadata";
+import { initializeCalendarProviderTags } from "./util/calendarTagInit";
 
 export let mapOfTags = [];
 export let extensionStorage;
@@ -523,145 +524,20 @@ const setTimeFormat = (example) => {
   }
 };
 
-// Initialize EventTags for connected Google Calendars
-// - Calendars with showAsSeparateTag: false are grouped under the main "Google Calendar" tag
-// - Calendars with showAsSeparateTag: true get their own EventTag with displayName as the tag name
-// Optional: pass calendars directly to avoid potential async storage timing issues
+// Initialize EventTags for connected Google Calendars.
+// Delegates to shared initializeCalendarProviderTags.
 export const initializeGCalTags = (calendarsOverride = null) => {
-  const connectedCalendars = calendarsOverride || getConnectedCalendars();
-  if (!connectedCalendars || !connectedCalendars.length) return;
-
-  // Get the main "Google Calendar" tag
-  const mainGCalTag = getTagFromName("Google calendar");
-  if (!mainGCalTag) {
-    console.warn("Main 'Google calendar' tag not found");
-    return;
-  }
-
-  // First, remove any GCal separate tags that are no longer configured as separate
-  const separateCalendarNames = connectedCalendars
-    .filter((cal) => cal.showAsSeparateTag)
-    .map((cal) => cal.displayName || cal.name);
-
-  // Remove GCal tags that are no longer separate (but keep non-GCal tags)
-  for (let i = mapOfTags.length - 1; i >= 0; i--) {
-    const tag = mapOfTags[i];
-    if (
-      tag.isGCalTag &&
-      tag.gCalCalendarId &&
-      !separateCalendarNames.includes(tag.name)
-    ) {
-      mapOfTags.splice(i, 1);
-    }
-  }
-
-  // Initialize arrays for the main tag
-  mainGCalTag.gCalCalendarIds = [];
-  mainGCalTag.disabledCalendarIds = [];
-
-  for (const calendarConfig of connectedCalendars) {
-    if (calendarConfig.showAsSeparateTag) {
-      // Calendar has its own separate tag
-      const tagName = calendarConfig.displayName || calendarConfig.name;
-      let existingTag = getTagFromName(tagName);
-
-      if (!existingTag) {
-        // Create new EventTag for this separate GCal calendar with trigger tags as pages
-        const pages = [tagName];
-        if (
-          calendarConfig.triggerTags &&
-          calendarConfig.triggerTags.length > 0
-        ) {
-          pages.push(...calendarConfig.triggerTags);
-        }
-
-        const gcalTag = new EventTag({
-          name: tagName,
-          color: Colors.GRAY3, // Default color, will be updated from fc-tags-info
-          ...getStoredTagInfos(tagName),
-          pages: pages,
-          isGCalTag: true,
-          gCalCalendarId: calendarConfig.id,
-          isToDisplay: true,
-          isToDisplayInSb: true,
-        });
-        mapOfTags.push(gcalTag);
-        console.log(
-          `Created separate EventTag for GCal calendar: ${tagName} with pages:`,
-          pages
-        );
-      } else {
-        // Update existing tag with GCal properties and add trigger tags as pages
-        existingTag.gCalCalendarId = calendarConfig.id;
-        existingTag.isGCalTag = true;
-
-        // Add trigger tags to pages if not already present
-        if (
-          calendarConfig.triggerTags &&
-          calendarConfig.triggerTags.length > 0
-        ) {
-          const currentPages = existingTag.pages || [existingTag.name];
-          const newPages = [
-            ...new Set([...currentPages, ...calendarConfig.triggerTags]),
-          ];
-          existingTag.updatePages(newPages);
-        }
-
-        // console.log(
-        //   `Updated separate EventTag for GCal calendar: ${tagName} with pages:`,
-        //   existingTag.pages
-        // );
-      }
-    } else {
-      // Calendar is grouped under main "Google Calendar" tag
-      mainGCalTag.gCalCalendarIds.push(calendarConfig.id);
-
-      // Track disabled calendars
-      if (!calendarConfig.syncEnabled) {
-        mainGCalTag.disabledCalendarIds.push(calendarConfig.id);
-      }
-
-      // Add trigger tags as pages/aliases to the main "Google calendar" tag
-      if (calendarConfig.triggerTags && calendarConfig.triggerTags.length > 0) {
-        const currentPages = mainGCalTag.pages || ["Google calendar"];
-        const newPages = [
-          ...new Set([...currentPages, ...calendarConfig.triggerTags]),
-        ];
-        mainGCalTag.updatePages(newPages);
-        // console.log(
-        //   `Added trigger tags to main GCal tag. Pages:`,
-        //   mainGCalTag.pages
-        // );
-      }
-    }
-  }
-
-  // If "Use Original Colors" is enabled, apply calendar colors to tags on initialization
-  if (getUseOriginalColors()) {
-    let defaultCalendarColor = null;
-
-    for (const calendarConfig of connectedCalendars) {
-      if (!calendarConfig.syncEnabled || !calendarConfig.backgroundColor)
-        continue;
-
-      if (calendarConfig.showAsSeparateTag) {
-        // Update the separate tag's color
-        const tagName = calendarConfig.displayName || calendarConfig.name;
-        const tag = getTagFromName(tagName);
-        if (tag) {
-          tag.setColor(calendarConfig.backgroundColor);
-        }
-      } else if (calendarConfig.isDefault) {
-        // Store the default calendar's color for the main tag
-        defaultCalendarColor = calendarConfig.backgroundColor;
-      }
-    }
-
-    // Apply the default calendar's color to the main "Google calendar" tag
-    if (defaultCalendarColor && mainGCalTag) {
-      mainGCalTag.setColor(defaultCalendarColor);
-    }
-  }
+  initializeCalendarProviderTags({
+    calendarsOverride,
+    getConnectedCalendars,
+    mainTagName: "Google calendar",
+    providerPrefix: "gCal",
+    defaultColor: Colors.GRAY3,
+    mapOfTags,
+    getStoredTagInfos,
+    applyOriginalColors: true,
+    getUseOriginalColors,
+  });
 };
 
 // Initialize EventTags for connected Google Task Lists
@@ -776,83 +652,18 @@ export const initializeGTaskTags = (taskListsOverride = null) => {
   }
 };
 
-// Initialize EventTags for connected Outlook Calendars
-// Mirrors initializeGCalTags pattern but for Outlook
+// Initialize EventTags for connected Outlook Calendars.
+// Delegates to shared initializeCalendarProviderTags.
 export const initializeOutlookTags = (calendarsOverride = null) => {
-  const connectedCalendars = calendarsOverride || getOutlookConnectedCalendars();
-  if (!connectedCalendars || !connectedCalendars.length) return;
-
-  const mainOutlookTag = getTagFromName("Outlook calendar");
-  if (!mainOutlookTag) {
-    console.warn("Main 'Outlook calendar' tag not found");
-    return;
-  }
-
-  // Remove Outlook separate tags that are no longer configured as separate
-  const separateCalendarNames = connectedCalendars
-    .filter((cal) => cal.showAsSeparateTag)
-    .map((cal) => cal.displayName || cal.name);
-
-  for (let i = mapOfTags.length - 1; i >= 0; i--) {
-    const tag = mapOfTags[i];
-    if (
-      tag.isOutlookTag &&
-      tag.outlookCalendarId &&
-      !separateCalendarNames.includes(tag.name)
-    ) {
-      mapOfTags.splice(i, 1);
-    }
-  }
-
-  mainOutlookTag.outlookCalendarIds = [];
-  mainOutlookTag.disabledOutlookCalendarIds = [];
-
-  for (const calendarConfig of connectedCalendars) {
-    if (calendarConfig.showAsSeparateTag) {
-      const tagName = calendarConfig.displayName || calendarConfig.name;
-      let existingTag = getTagFromName(tagName);
-
-      if (!existingTag) {
-        const pages = [tagName];
-        if (calendarConfig.triggerTags && calendarConfig.triggerTags.length > 0) {
-          pages.push(...calendarConfig.triggerTags);
-        }
-
-        const outlookTag = new EventTag({
-          name: tagName,
-          color: "#0078d4",
-          ...getStoredTagInfos(tagName),
-          pages: pages,
-          isOutlookTag: true,
-          outlookCalendarId: calendarConfig.id,
-          isToDisplay: true,
-          isToDisplayInSb: true,
-        });
-        mapOfTags.push(outlookTag);
-      } else {
-        existingTag.outlookCalendarId = calendarConfig.id;
-        existingTag.isOutlookTag = true;
-
-        if (calendarConfig.triggerTags && calendarConfig.triggerTags.length > 0) {
-          const currentPages = existingTag.pages || [existingTag.name];
-          const newPages = [...new Set([...currentPages, ...calendarConfig.triggerTags])];
-          existingTag.updatePages(newPages);
-        }
-      }
-    } else {
-      mainOutlookTag.outlookCalendarIds.push(calendarConfig.id);
-
-      if (!calendarConfig.syncEnabled) {
-        mainOutlookTag.disabledOutlookCalendarIds.push(calendarConfig.id);
-      }
-
-      if (calendarConfig.triggerTags && calendarConfig.triggerTags.length > 0) {
-        const currentPages = mainOutlookTag.pages || ["Outlook calendar"];
-        const newPages = [...new Set([...currentPages, ...calendarConfig.triggerTags])];
-        mainOutlookTag.updatePages(newPages);
-      }
-    }
-  }
+  initializeCalendarProviderTags({
+    calendarsOverride,
+    getConnectedCalendars: getOutlookConnectedCalendars,
+    mainTagName: "Outlook calendar",
+    providerPrefix: "outlook",
+    defaultColor: "#0078d4",
+    mapOfTags,
+    getStoredTagInfos,
+  });
 };
 
 // clean calendarTag data, solve conflict from v.4 or from quit just after setting change

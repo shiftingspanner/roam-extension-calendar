@@ -1,7 +1,8 @@
 /**
  * Outlook Sync Service - Handles two-way synchronization between Roam and Outlook Calendar
  *
- * Independent sync orchestrator mirroring syncService.js but using Outlook APIs.
+ * Independent sync orchestrator using Outlook APIs.
+ * Shared helpers are imported from syncHelpers.js to avoid duplication with syncService.js.
  * Reuses existing provider-agnostic services: syncLockService, deduplicationService.
  */
 
@@ -33,6 +34,7 @@ import {
   outlookEventToRoamContent,
   mergeOutlookDataToFCEvent,
   cleanTitleForOutlook,
+  parseOutlookDateTime,
 } from "../util/outlookMapping";
 
 import {
@@ -53,20 +55,17 @@ import { parseRange, dateToISOString } from "../util/dates";
 
 import { acquireSyncLock, releaseSyncLock } from "./syncLockService";
 
-import { Toaster, Position, Intent } from "@blueprintjs/core";
-
-import { areEventsDuplicate } from "./deduplicationService";
+import {
+  hasTodoMarker,
+  findDateChildBlocks,
+  updateChildBlockDate,
+  showGenericSyncResultToast,
+  syncBlockToDefaultProviderCalendar,
+  findMatchingExternalEvents,
+} from "./syncHelpers";
 
 import { getCalendarUidFromPage } from "../util/data";
-import { startDateRegex, untilDateRegex, roamDateRegex } from "../util/regex";
 import { rangeEndAttribute } from "../index";
-
-/**
- * Helper to detect if a block content contains TODO marker
- */
-const hasTodoMarker = (content) => {
-  return content && content.includes("{{[[TODO]]}}");
-};
 
 /**
  * Helper to extract end date from Outlook event for storage
@@ -102,10 +101,6 @@ export const createOutlookSyncResult = () => ({
 
 /**
  * Sync a single Roam event to Outlook Calendar
- * @param {string} roamUid - Roam block UID
- * @param {object} fcEvent - FullCalendar event object
- * @param {string} calendarId - Target Outlook Calendar ID
- * @returns {object} Sync result
  */
 export const syncEventToOutlook = async (roamUid, fcEvent, calendarId) => {
   if (!acquireSyncLock(roamUid)) {
@@ -465,7 +460,7 @@ export const applyOutlookToRoamUpdate = async (
     const newEventDate = new Date(outlookStartDate);
     const newDnpUid = window.roamAlphaAPI.util.dateToPageUid(newEventDate);
 
-    // Handle child blocks with start/end dates
+    // Handle child blocks with start/end dates using shared helpers
     const { startBlock, endBlock } = findDateChildBlocks(roamUid);
 
     let outlookStartDateObj = new Date(outlookStartDate);
@@ -561,66 +556,6 @@ export const applyOutlookToRoamUpdate = async (
 };
 
 /**
- * Find child blocks containing date information
- */
-const findDateChildBlocks = (parentUid) => {
-  const tree = getTreeByUid(parentUid);
-  if (!tree || !tree[0] || !tree[0].children) {
-    return { startBlock: null, endBlock: null };
-  }
-
-  let startBlock = null;
-  let endBlock = null;
-
-  for (const child of tree[0].children) {
-    const content = child.string || "";
-
-    if (startDateRegex) {
-      startDateRegex.lastIndex = 0;
-      if (startDateRegex.test(content)) {
-        startBlock = { uid: child.uid, content };
-      }
-    }
-
-    if (untilDateRegex) {
-      untilDateRegex.lastIndex = 0;
-      if (untilDateRegex.test(content)) {
-        endBlock = { uid: child.uid, content };
-      }
-    }
-
-    roamDateRegex.lastIndex = 0;
-    if (roamDateRegex.test(content) && !startBlock && !endBlock) {
-      if (
-        rangeEndAttribute &&
-        content.toLowerCase().includes(rangeEndAttribute.toLowerCase())
-      ) {
-        endBlock = { uid: child.uid, content };
-      }
-    }
-  }
-
-  return { startBlock, endBlock };
-};
-
-/**
- * Update a child block's date reference
- */
-const updateChildBlockDate = async (blockUid, currentContent, newDate) => {
-  const newRoamDate = window.roamAlphaAPI.util.dateToPageTitle(newDate);
-  roamDateRegex.lastIndex = 0;
-  const matchingDates = currentContent.match(roamDateRegex);
-
-  if (matchingDates && matchingDates.length) {
-    const currentDateStr = matchingDates[0]
-      .replace("[[", "")
-      .replace("]]", "");
-    const newContent = currentContent.replace(currentDateStr, newRoamDate);
-    await updateBlock(blockUid, newContent);
-  }
-};
-
-/**
  * Full sync for all connected Outlook calendars
  */
 export const fullOutlookSync = async () => {
@@ -642,295 +577,39 @@ export const fullOutlookSync = async () => {
 };
 
 /**
- * Format event date/time for display in toast
- */
-const formatEventDateTime = (startDateTime, endDateTime) => {
-  if (!startDateTime) return "";
-
-  const start = new Date(startDateTime);
-  const hasTime = startDateTime.includes("T");
-
-  const dateFormat = new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-  });
-
-  const timeFormat = new Intl.DateTimeFormat("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
-  });
-
-  let result = dateFormat.format(start);
-
-  if (hasTime) {
-    result += " at " + timeFormat.format(start);
-
-    if (endDateTime) {
-      const end = new Date(endDateTime);
-      if (start.toDateString() !== end.toDateString()) {
-        result +=
-          " - " + dateFormat.format(end) + " at " + timeFormat.format(end);
-      } else {
-        result += " - " + timeFormat.format(end);
-      }
-    }
-  } else if (endDateTime) {
-    const end = new Date(endDateTime);
-    if (start.toDateString() !== end.toDateString()) {
-      result += " - " + dateFormat.format(end);
-    }
-  }
-
-  return result;
-};
-
-/**
- * Show Outlook sync result toast notification
+ * Show Outlook sync result toast notification.
+ * Delegates to shared showGenericSyncResultToast.
  */
 export const showOutlookSyncResultToast = (result, blockUid) => {
-  const toaster = Toaster.create({ position: Position.TOP });
-
-  if (result.success) {
-    const blockContent = getBlockContentByUid(blockUid) || "Event";
-    const actionText =
-      result.action === "created" ? "created in" : "updated in";
-    const eventTitle =
-      blockContent.length > 50
-        ? blockContent.substring(0, 47) + "..."
-        : blockContent;
-
-    const dateTimeStr = formatEventDateTime(result.eventStart, result.eventEnd);
-    const dateTimeInfo = dateTimeStr ? ` (${dateTimeStr})` : "";
-
-    toaster.show({
-      message: `"${eventTitle}" ${actionText} Outlook: ${result.calendarName}${dateTimeInfo}`,
-      intent: Intent.SUCCESS,
-      icon: "tick-circle",
-      timeout: 4000,
-    });
-  } else {
-    let intent = Intent.DANGER;
-    let icon = "error";
-
-    if (
-      result.error.includes("not determine event date") ||
-      result.error.includes("Block not found")
-    ) {
-      intent = Intent.WARNING;
-      icon = "warning-sign";
-    }
-
-    toaster.show({
-      message: result.error,
-      intent: intent,
-      icon: icon,
-      timeout: 5000,
-    });
-  }
+  showGenericSyncResultToast(result, blockUid, "Outlook");
 };
 
 /**
- * Sync a block to the default Outlook Calendar
- * Called from block context menu or command palette
+ * Sync a block to the default Outlook Calendar.
+ * Delegates to shared syncBlockToDefaultProviderCalendar.
  */
 export const syncBlockToDefaultOutlookCalendar = async (blockContextOrUid) => {
-  try {
-    const blockUid =
-      typeof blockContextOrUid === "string"
-        ? blockContextOrUid
-        : blockContextOrUid["block-uid"];
-
-    const blockContent = getBlockContentByUid(blockUid);
-
-    if (!blockContent) {
-      return {
-        success: false,
-        error: "Block not found or empty",
-      };
-    }
-
-    const calendars = getOutlookConnectedCalendars();
-    if (!calendars || calendars.length === 0) {
-      return {
-        success: false,
-        error: "No Outlook Calendar connected. Please configure Outlook Calendar first.",
-      };
-    }
-
-    const defaultCalendar = calendars.find(
-      (cal) => cal.syncEnabled && cal.syncDirection !== "import"
-    );
-    if (!defaultCalendar) {
-      return {
-        success: false,
-        error: "No Outlook calendar available for sync. Please enable sync for at least one calendar.",
-      };
-    }
-
-    const eventDate = getEventDateFromBlock(blockUid);
-    if (!eventDate) {
-      return {
-        success: false,
-        error: "Could not determine event date. Block must be in a Daily Note Page or contain a date reference.",
-      };
-    }
-
-    const eventDateStr = dateToISOString(eventDate);
-    const rangeInfo = parseRange(blockContent);
-
-    const fcEvent = {
-      id: blockUid,
-      title: blockContent,
-      start: rangeInfo
-        ? `${eventDateStr}T${rangeInfo.range.start}`
-        : eventDateStr,
-      end:
-        rangeInfo && rangeInfo.range.end
-          ? `${eventDateStr}T${rangeInfo.range.end}`
-          : null,
-      extendedProps: {
-        eventTags: [],
-      },
-    };
-
-    // Add calendar tag to block if not present
-    if (!blockHasCalendarTag(blockUid, defaultCalendar)) {
-      let tagToAdd = null;
-      if (
-        defaultCalendar.triggerTags &&
-        defaultCalendar.triggerTags.length > 0
-      ) {
-        tagToAdd = defaultCalendar.triggerTags[0];
-      } else if (defaultCalendar.displayName) {
-        tagToAdd = defaultCalendar.displayName;
-      }
-
-      if (tagToAdd) {
-        await addTagToBlock(blockUid, tagToAdd);
-      }
-    }
-
-    const result = await syncEventToOutlook(
-      blockUid,
-      fcEvent,
-      defaultCalendar.id
-    );
-
-    if (result.success) {
-      return {
-        success: true,
-        action: result.action,
-        calendarName: defaultCalendar.name,
-        outlookId: result.outlookId,
-        eventStart: fcEvent.start,
-        eventEnd: fcEvent.end,
-      };
-    } else if (result.skipped) {
-      return {
-        success: false,
-        error: "Sync already in progress for this block",
-      };
-    } else {
-      let errorMessage = result.error || "Unknown error";
-
-      if (
-        errorMessage.includes("Failed to fetch") ||
-        errorMessage.includes("NetworkError") ||
-        errorMessage.includes("network")
-      ) {
-        errorMessage =
-          "Unable to connect to Outlook Calendar. Please check your internet connection.";
-      } else if (
-        errorMessage.includes("401") ||
-        errorMessage.includes("Unauthorized")
-      ) {
-        errorMessage =
-          "Outlook Calendar authentication expired. Please reconnect your calendar.";
-      } else if (
-        errorMessage.includes("403") ||
-        errorMessage.includes("Forbidden")
-      ) {
-        errorMessage =
-          "Permission denied. Please check your Outlook Calendar permissions.";
-      }
-
-      return {
-        success: false,
-        error: errorMessage,
-      };
-    }
-  } catch (error) {
-    console.error("[OutlookSync] Error syncing block:", error);
-
-    let errorMessage = error.message;
-    if (
-      errorMessage.includes("Failed to fetch") ||
-      errorMessage.includes("NetworkError")
-    ) {
-      errorMessage =
-        "Unable to connect to Outlook Calendar. Please check your internet connection.";
-    }
-
-    return {
-      success: false,
-      error: errorMessage,
-    };
-  }
+  return syncBlockToDefaultProviderCalendar(blockContextOrUid, {
+    getConnectedCalendars: getOutlookConnectedCalendars,
+    syncEventFn: syncEventToOutlook,
+    providerName: "Outlook Calendar",
+  });
 };
 
 /**
- * Find matching Outlook events for a Roam event
+ * Find matching Outlook events for a Roam event.
+ * Delegates to shared findMatchingExternalEvents.
  */
 export const findMatchingOutlookEvents = async (fcEvent, calendarId) => {
-  try {
-    const eventDate = new Date(fcEvent.start);
-    const startOfDay = new Date(
-      eventDate.getFullYear(),
-      eventDate.getMonth(),
-      eventDate.getDate()
-    );
-    const endOfDay = new Date(
-      eventDate.getFullYear(),
-      eventDate.getMonth(),
-      eventDate.getDate() + 1
-    );
-
-    const outlookEvents = await getOutlookEvents(
-      calendarId,
-      startOfDay,
-      endOfDay
-    );
-
-    const roamEventForComparison = {
-      id: fcEvent.id,
-      summary: fcEvent.title,
-      start: fcEvent.start,
-      end: fcEvent.end,
-    };
-
-    const matches = outlookEvents.filter((outlookEvent) => {
-      if (outlookEvent.isCancelled) return false;
-
-      const existingRoamUid = getRoamUidByOutlookId(outlookEvent.id);
-      if (existingRoamUid) return false;
-
-      // Compare using subject field for Outlook events
-      const outlookForComparison = {
-        id: outlookEvent.id,
-        summary: outlookEvent.subject,
-        start: outlookEvent.start?.dateTime,
-        end: outlookEvent.end?.dateTime,
-      };
-
-      return areEventsDuplicate(roamEventForComparison, outlookForComparison);
-    });
-
-    return matches;
-  } catch (error) {
-    console.error("[OutlookSync] Error finding matching events:", error);
-    return [];
-  }
+  return findMatchingExternalEvents(fcEvent, calendarId, {
+    getEventsFn: getOutlookEvents,
+    getRoamUidByExternalIdFn: getRoamUidByOutlookId,
+    getSubjectFn: (e) => e.subject,
+    getStartFn: (e) => e.start?.dateTime,
+    getEndFn: (e) => e.end?.dateTime,
+    isCancelledFn: (e) => e.isCancelled,
+    getIdFn: (e) => e.id,
+  });
 };
 
 /**

@@ -1,20 +1,33 @@
 /**
  * Outlook Calendar Event Mapping Utilities
  *
- * Handles conversion between Microsoft Graph events and FullCalendar events
+ * Handles conversion between Microsoft Graph events and FullCalendar events.
+ * Delegates shared logic to calendarMapping.js to avoid duplication with Google Calendar.
  */
 
 import { DateTime } from "luxon";
 import { getTagFromName } from "../models/EventTag";
 import { OutlookSyncStatus } from "../models/OutlookSyncMetadata";
-import { parseRange, getNormalizedTimestamp, strictTimestampRegex } from "./dates";
 import {
   getOutlookUseOriginalColors,
   getOutlookCheckboxFormat,
   getOutlookConnectedCalendars,
 } from "../services/outlookCalendarService";
 import { getBlockContentByUid } from "./roamApi";
-import { uidRegex } from "./regex";
+import {
+  cleanTitleForCalendar,
+  convertCalTodoToRoam,
+  buildRoamContentFromCalEvent,
+  extractBlockReferences,
+  buildCalendarDescription,
+  findCalendarForEvent as sharedFindCalendarForEvent,
+  hasSyncTriggerTag as sharedHasSyncTriggerTag,
+  parseCalDescriptionToBlocks,
+  parseCalMetadataToBlocks,
+  normalizeStartDate,
+  normalizeEndDate,
+  buildDefaultEndDate,
+} from "./calendarMapping";
 
 // Outlook category name to hex color mapping
 const OUTLOOK_CATEGORY_COLORS = {
@@ -45,15 +58,13 @@ const OUTLOOK_CALENDAR_COLORS = {
  * Parse Outlook datetime (with timezone) to a JS Date-compatible ISO string
  * Outlook sends: { dateTime: "2025-01-15T10:00:00.0000000", timeZone: "Pacific Standard Time" }
  */
-const parseOutlookDateTime = (outlookDateTime) => {
+export const parseOutlookDateTime = (outlookDateTime) => {
   if (!outlookDateTime || !outlookDateTime.dateTime) return null;
 
   const tz = outlookDateTime.timeZone || "UTC";
-  // luxon can parse IANA and Windows timezone names
   const dt = DateTime.fromISO(outlookDateTime.dateTime, { zone: tz });
 
   if (!dt.isValid) {
-    // Fallback: try treating the datetime as UTC
     return new Date(outlookDateTime.dateTime + "Z").toISOString();
   }
 
@@ -62,9 +73,6 @@ const parseOutlookDateTime = (outlookDateTime) => {
 
 /**
  * Convert a Microsoft Graph event to a FullCalendar event
- * @param {object} outlookEvent - Microsoft Graph event object
- * @param {object} calendarConfig - Connected calendar configuration
- * @returns {object} FullCalendar event object
  */
 export const outlookEventToFCEvent = (outlookEvent, calendarConfig) => {
   const isAllDay = outlookEvent.isAllDay === true;
@@ -112,7 +120,6 @@ export const outlookEventToFCEvent = (outlookEvent, calendarConfig) => {
   // Parse dates
   let start, end;
   if (isAllDay) {
-    // For all-day events, extract just the date part
     start = outlookEvent.start.dateTime.split("T")[0];
     end = outlookEvent.end.dateTime.split("T")[0];
   } else {
@@ -123,12 +130,7 @@ export const outlookEventToFCEvent = (outlookEvent, calendarConfig) => {
   // Extract description text from body
   let description = "";
   if (outlookEvent.body) {
-    if (outlookEvent.body.contentType === "text") {
-      description = outlookEvent.body.content || "";
-    } else {
-      // HTML - store as-is, will be parsed when needed
-      description = outlookEvent.body.content || "";
-    }
+    description = outlookEvent.body.content || "";
   }
 
   const fcEvent = {
@@ -153,7 +155,6 @@ export const outlookEventToFCEvent = (outlookEvent, calendarConfig) => {
       location: outlookEvent.location?.displayName || "",
       syncStatus: OutlookSyncStatus.OUTLOOK_ONLY,
       isOutlookEvent: true,
-      // Original Outlook data for reference
       outlookEventData: {
         webLink: outlookEvent.webLink,
         organizer: outlookEvent.organizer,
@@ -174,11 +175,8 @@ export const outlookEventToFCEvent = (outlookEvent, calendarConfig) => {
 };
 
 /**
- * Convert a FullCalendar/Roam event to a Microsoft Graph event
- * @param {object} fcEvent - FullCalendar event object
- * @param {string} calendarId - Target Outlook Calendar ID
- * @param {string} roamUid - Optional Roam block UID to add link to description
- * @returns {object} Microsoft Graph event resource
+ * Convert a FullCalendar/Roam event to a Microsoft Graph event.
+ * Uses shared utilities for block refs, description building, and date normalization.
  */
 export const fcEventToOutlookEvent = (fcEvent, calendarId, roamUid = null) => {
   let title = fcEvent.title;
@@ -189,21 +187,10 @@ export const fcEventToOutlookEvent = (fcEvent, calendarId, roamUid = null) => {
     }
   }
 
-  // Extract block references for description
-  const blockRefLegend = [];
-  if (title) {
-    uidRegex.lastIndex = 0;
-    const matches = Array.from(title.matchAll(uidRegex));
-    for (const match of matches) {
-      const refUid = match[0].slice(2, -2);
-      const resolvedContent = getBlockContentByUid(refUid);
-      if (resolvedContent) {
-        blockRefLegend.push({ ref: match[0], content: resolvedContent });
-      }
-    }
-  }
+  // Extract block references using shared utility
+  const blockRefLegend = extractBlockReferences(title);
 
-  // Clean title
+  // Clean title using Outlook-specific cleaner
   const connectedCalendars = getOutlookConnectedCalendars();
   const calendarConfig = connectedCalendars.find((c) => c.id === calendarId);
   const triggerTags = calendarConfig?.triggerTags || [];
@@ -216,29 +203,13 @@ export const fcEventToOutlookEvent = (fcEvent, calendarId, roamUid = null) => {
     subject: title,
   };
 
-  // Build description
-  let description = fcEvent.extendedProps?.description || "";
-
-  description = description
-    .replace(/\n*---\nBlock references:[\s\S]*?(?=\n---\nRoam block:|$)/s, "")
-    .trim();
-  description = description.replace(/\n*---\nRoam block:.*$/s, "").trim();
-
-  if (blockRefLegend.length > 0) {
-    description += "\n\n---\nBlock references:";
-    for (const { ref, content } of blockRefLegend) {
-      const cleanedContent = cleanTitleForOutlook(content);
-      description += `\n${ref} = ${cleanedContent}`;
-    }
-  }
-
-  if (roamUid) {
-    const graphName = window.roamAlphaAPI?.graph?.name;
-    if (graphName) {
-      const roamLink = `https://roamresearch.com/#/app/${graphName}/page/${roamUid}`;
-      description += `\n\n---\nRoam block: ${roamLink}`;
-    }
-  }
+  // Build description using shared utility
+  const description = buildCalendarDescription(
+    fcEvent.extendedProps?.description || "",
+    blockRefLegend,
+    roamUid,
+    (content) => cleanTitleForOutlook(content)
+  );
 
   if (description) {
     outlookEvent.body = {
@@ -247,19 +218,9 @@ export const fcEventToOutlookEvent = (fcEvent, calendarId, roamUid = null) => {
     };
   }
 
-  // Handle dates
-  let startDate = fcEvent.start;
-  if (!(startDate instanceof Date)) {
-    startDate = new Date(startDate);
-  }
-  if (isNaN(startDate.getTime())) {
-    if (fcEvent.date) {
-      startDate = new Date(fcEvent.date);
-    }
-    if (isNaN(startDate.getTime())) {
-      startDate = new Date();
-    }
-  }
+  // Normalize dates using shared utilities
+  const startDate = normalizeStartDate(fcEvent.start, fcEvent.date);
+  let endDate = normalizeEndDate(fcEvent.end);
 
   if (isAllDay) {
     outlookEvent.isAllDay = true;
@@ -275,125 +236,35 @@ export const fcEventToOutlookEvent = (fcEvent, calendarId, roamUid = null) => {
     };
   }
 
-  // Handle end time
-  let endDate = fcEvent.end;
-  if (endDate) {
-    if (!(endDate instanceof Date)) {
-      endDate = new Date(endDate);
-    }
-    if (isNaN(endDate.getTime())) {
-      endDate = null;
-    }
+  if (!endDate) {
+    endDate = buildDefaultEndDate(startDate, isAllDay);
   }
 
-  if (endDate) {
-    if (isAllDay) {
-      outlookEvent.end = {
-        dateTime: formatDateForOutlook(endDate),
-        timeZone: userTimeZone,
-      };
-    } else {
-      outlookEvent.end = {
-        dateTime: formatDateTimeForOutlook(endDate),
-        timeZone: userTimeZone,
-      };
-    }
+  if (isAllDay) {
+    outlookEvent.end = {
+      dateTime: formatDateForOutlook(endDate),
+      timeZone: userTimeZone,
+    };
   } else {
-    if (isAllDay) {
-      const defaultEnd = new Date(startDate);
-      defaultEnd.setDate(defaultEnd.getDate() + 1);
-      outlookEvent.end = {
-        dateTime: formatDateForOutlook(defaultEnd),
-        timeZone: userTimeZone,
-      };
-    } else {
-      const defaultEnd = new Date(startDate);
-      defaultEnd.setHours(defaultEnd.getHours() + 1);
-      outlookEvent.end = {
-        dateTime: formatDateTimeForOutlook(defaultEnd),
-        timeZone: userTimeZone,
-      };
-    }
+    outlookEvent.end = {
+      dateTime: formatDateTimeForOutlook(endDate),
+      timeZone: userTimeZone,
+    };
   }
 
   return outlookEvent;
 };
 
 /**
- * Clean a Roam block title for Outlook Calendar
- * Removes Roam-specific syntax but preserves TODO/DONE based on user preference
- * @param {string} title - The Roam block title to clean
- * @param {string[]} triggerTagsToRemove - Optional array of trigger tags to remove
+ * Clean a Roam block title for Outlook Calendar.
+ * Delegates to shared cleanTitleForCalendar with Outlook-specific defaults.
  */
 export const cleanTitleForOutlook = (title, triggerTagsToRemove = null) => {
-  if (!title) return "";
-
-  let cleaned = title;
-
-  cleaned = cleaned.replace(/^[•\-]\s*/, "");
-
-  const checkboxFormat = getOutlookCheckboxFormat();
-
-  if (checkboxFormat === "bracket") {
-    cleaned = cleaned.replace(/^\{\{\[\[TODO\]\]\}\}\s*/g, "[ ] ");
-    cleaned = cleaned.replace(/^\{\{\[\[DONE\]\]\}\}\s*/g, "[x] ");
-  } else {
-    cleaned = cleaned.replace(/\{\{\[\[TODO\]\]\}\}/g, "[[TODO]]");
-    cleaned = cleaned.replace(/\{\{\[\[DONE\]\]\}\}/g, "[[DONE]]");
-  }
-
-  // Protect backtick content
-  const backtickContent = [];
-  cleaned = cleaned.replace(/`([^`]+)`/g, (match, content) => {
-    backtickContent.push(content);
-    return `__BACKTICK_${backtickContent.length - 1}__`;
+  return cleanTitleForCalendar(title, {
+    triggerTagsToRemove,
+    defaultTag: "Outlook calendar",
+    getCheckboxFormat: getOutlookCheckboxFormat,
   });
-
-  // Remove hashtags - either specific trigger tags or all hashtags
-  if (triggerTagsToRemove !== null) {
-    const tagsToRemove = [
-      ...new Set([...triggerTagsToRemove, "Outlook calendar"]),
-    ];
-    for (const tag of tagsToRemove) {
-      if (!tag || !tag.trim()) continue;
-      const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      cleaned = cleaned.replace(
-        new RegExp(`#\\[\\[${escapedTag}\\]\\]`, "gi"),
-        ""
-      );
-      if (!tag.includes(" ")) {
-        cleaned = cleaned.replace(
-          new RegExp(`#${escapedTag}(?=\\s|$)`, "gi"),
-          ""
-        );
-      }
-      cleaned = cleaned.replace(
-        new RegExp(`\\[\\[${escapedTag}\\]\\]`, "gi"),
-        ""
-      );
-    }
-  } else {
-    cleaned = cleaned.replace(/#\[\[([^\]]+)\]\]/g, "");
-    cleaned = cleaned.replace(/#([^\s]+)/g, "");
-  }
-
-  // Remove page references except [[TODO]] and [[DONE]]
-  cleaned = cleaned.replace(/\[\[(?!TODO\]\]|DONE\]\])([^\]]+)\]\]/g, "$1");
-
-  // Remove block embeds
-  cleaned = cleaned.replace(/\{\{embed:\s*\(\([a-zA-Z0-9_-]+\)\)\}\}/g, "");
-
-  // Remove other Roam syntax
-  cleaned = cleaned.replace(/\{\{[^}]+\}\}/g, "");
-
-  // Restore backtick content
-  cleaned = cleaned.replace(/__BACKTICK_(\d+)__/g, (match, index) => {
-    return `\`${backtickContent[parseInt(index)]}\``;
-  });
-
-  cleaned = cleaned.replace(/\s+/g, " ").trim();
-
-  return cleaned || "(No title)";
 };
 
 /**
@@ -488,218 +359,78 @@ export const isSameOutlookEvent = (fcEvent, outlookEvent) => {
 };
 
 /**
- * Determine if an FC event should be synced to Outlook based on its tags
- * @param {object} fcEvent - FullCalendar event
- * @param {array} connectedCalendars - Array of connected Outlook calendar configs
- * @returns {object|null} Calendar config to sync to, or null if no match
+ * Determine if an FC event should be synced to Outlook based on its tags.
+ * Delegates to shared findCalendarForEvent.
  */
-export const findOutlookCalendarForEvent = (fcEvent, connectedCalendars) => {
-  const eventTags = fcEvent.extendedProps?.eventTags || [];
-
-  for (const calendar of connectedCalendars) {
-    if (!calendar.syncEnabled) continue;
-    if (calendar.syncDirection === "import") continue;
-
-    for (const eventTag of eventTags) {
-      const tagName = eventTag.name?.toLowerCase();
-
-      if (
-        calendar.displayName &&
-        calendar.displayName.toLowerCase() === tagName
-      ) {
-        return calendar;
-      }
-
-      if (calendar.triggerTags && calendar.triggerTags.length > 0) {
-        if (
-          calendar.triggerTags.some(
-            (trigger) => trigger.toLowerCase() === tagName
-          )
-        ) {
-          return calendar;
-        }
-
-        if (eventTag.pages && Array.isArray(eventTag.pages)) {
-          for (const page of eventTag.pages) {
-            if (
-              calendar.triggerTags.some(
-                (trigger) => trigger.toLowerCase() === page.toLowerCase()
-              )
-            ) {
-              return calendar;
-            }
-          }
-        }
-      }
-    }
-  }
-
-  return null;
-};
+export const findOutlookCalendarForEvent = sharedFindCalendarForEvent;
 
 /**
- * Check if an event has any Outlook sync trigger tags
+ * Check if an event has any Outlook sync trigger tags.
+ * Delegates to shared hasSyncTriggerTag.
  */
-export const hasOutlookSyncTriggerTag = (fcEvent, connectedCalendars) => {
-  return findOutlookCalendarForEvent(fcEvent, connectedCalendars) !== null;
-};
+export const hasOutlookSyncTriggerTag = sharedHasSyncTriggerTag;
 
 /**
- * Convert [[TODO]], [[DONE]], [ ], or [x] in Outlook title to Roam format
+ * Convert [[TODO]], [[DONE]], [ ], or [x] in Outlook title to Roam format.
+ * Delegates to shared convertCalTodoToRoam.
  */
-export const convertOutlookTodoToRoam = (title) => {
-  if (!title) return title;
-  let converted = title;
-
-  converted = converted.replace(/^\[\[TODO\]\]\s*/g, "{{[[TODO]]}} ");
-  converted = converted.replace(/^\[\[DONE\]\]\s*/g, "{{[[DONE]]}} ");
-  converted = converted.replace(/^\[\s*\]\s*/g, "{{[[TODO]]}} ");
-  converted = converted.replace(/^\[x\]\s*/g, "{{[[DONE]]}} ");
-
-  return converted;
-};
+export const convertOutlookTodoToRoam = convertCalTodoToRoam;
 
 /**
- * Extract Roam block content from Outlook event
- * Used when importing an Outlook event to Roam
- * @param {object} outlookEvent - Microsoft Graph event
- * @param {object} calendarConfig - Calendar configuration
- * @param {boolean} hadOriginalTimeRange - If true, the original had a time range
+ * Extract Roam block content from Outlook event.
+ * Delegates to shared buildRoamContentFromCalEvent with Outlook field mapping.
  */
 export const outlookEventToRoamContent = (
   outlookEvent,
   calendarConfig,
   hadOriginalTimeRange = null
 ) => {
-  let content = "";
+  const isAllDay = outlookEvent.isAllDay === true;
+  let startDate = null;
+  let endDate = null;
 
-  let title = outlookEvent.subject || "(No title)";
-  title = convertOutlookTodoToRoam(title);
-
-  const titleHasTimeRange = parseRange(title) !== null;
-  const titleHasTimestamp =
-    titleHasTimeRange ||
-    getNormalizedTimestamp(title, strictTimestampRegex) !== null;
-
-  // Add time for timed (non-all-day) events
-  if (!outlookEvent.isAllDay && outlookEvent.start?.dateTime && !titleHasTimestamp) {
+  if (!isAllDay && outlookEvent.start?.dateTime) {
     const startDt = parseOutlookDateTime(outlookEvent.start);
-    const startDate = new Date(startDt);
-    const hours = startDate.getHours();
-    const minutes = startDate.getMinutes();
-    const timeStr = `${hours}:${String(minutes).padStart(2, "0")}`;
-
-    const shouldIncludeEndTime =
-      hadOriginalTimeRange === true || hadOriginalTimeRange === null;
-
-    if (shouldIncludeEndTime && outlookEvent.end?.dateTime) {
-      const endDt = parseOutlookDateTime(outlookEvent.end);
-      const endDate = new Date(endDt);
-      const endHours = endDate.getHours();
-      const endMinutes = endDate.getMinutes();
-      const endTimeStr = `${endHours}:${String(endMinutes).padStart(2, "0")}`;
-
-      const durationMs = endDate.getTime() - startDate.getTime();
-      const isDefaultDuration = durationMs === 3600000;
-
-      if (
-        hadOriginalTimeRange === true ||
-        (hadOriginalTimeRange === null && !isDefaultDuration)
-      ) {
-        content += `${timeStr}-${endTimeStr} `;
-      } else {
-        content += `${timeStr} `;
-      }
-    } else {
-      content += `${timeStr} `;
-    }
+    startDate = startDt ? new Date(startDt) : null;
+  }
+  if (!isAllDay && outlookEvent.end?.dateTime) {
+    const endDt = parseOutlookDateTime(outlookEvent.end);
+    endDate = endDt ? new Date(endDt) : null;
   }
 
-  content += title;
-
-  // Add trigger tag
-  const customTag = calendarConfig.triggerTags?.[0]?.trim();
-  const tagToAdd = customTag || "Outlook calendar";
-  content += tagToAdd.includes(" ")
-    ? ` #[[${tagToAdd}]]`
-    : ` #${tagToAdd}`;
-
-  return content;
+  return buildRoamContentFromCalEvent({
+    title: outlookEvent.subject,
+    isAllDay,
+    startDate,
+    endDate,
+    calendarConfig,
+    hadOriginalTimeRange,
+    defaultTag: "Outlook calendar",
+  });
 };
 
 /**
- * Parse HTML description from Outlook into an array of Roam block contents
- * @param {string} htmlDescription - HTML description from Outlook event body
- * @returns {string[]} Array of block contents
+ * Parse HTML description from Outlook into an array of Roam block contents.
+ * Delegates to shared parseCalDescriptionToBlocks.
  */
-export const parseOutlookDescriptionToBlocks = (htmlDescription) => {
-  if (!htmlDescription) return [];
-
-  let text = htmlDescription;
-
-  // Remove Roam link section
-  text = text.replace(/\n*---\n*Roam block:.*$/s, "").trim();
-  text = text
-    .replace(/\n*---\n*Block references:[\s\S]*?(?=\n---\n|$)/s, "")
-    .trim();
-
-  // Convert HTML to text
-  text = text.replace(/<br\s*\/?>/gi, "\n");
-  text = text.replace(/<\/p>/gi, "\n");
-  text = text.replace(/<\/div>/gi, "\n");
-  text = text.replace(/<li[^>]*>/gi, "\n• ");
-  text = text.replace(/<\/li>/gi, "");
-  text = text.replace(
-    /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([^<]*)<\/a>/gi,
-    "[$2]($1)"
-  );
-  text = text.replace(/<[^>]*>/g, "");
-
-  // Decode HTML entities
-  text = text.replace(/&nbsp;/g, " ");
-  text = text.replace(/&amp;/g, "&");
-  text = text.replace(/&lt;/g, "<");
-  text = text.replace(/&gt;/g, ">");
-  text = text.replace(/&quot;/g, '"');
-  text = text.replace(/&#39;/g, "'");
-  text = text.replace(/&apos;/g, "'");
-
-  const lines = text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-
-  return lines;
-};
+export const parseOutlookDescriptionToBlocks = parseCalDescriptionToBlocks;
 
 /**
- * Parse Outlook event metadata into Roam child blocks
- * @param {object} event - FullCalendar event with extendedProps
- * @returns {string[]} Array of block contents for metadata
+ * Parse Outlook event metadata into Roam child blocks.
+ * Delegates to shared parseCalMetadataToBlocks with Outlook-specific field accessors.
  */
 export const parseOutlookMetadataToBlocks = (event) => {
-  const blocks = [];
   const extendedProps = event.extendedProps || {};
   const outlookEventData = extendedProps.outlookEventData || {};
 
-  if (extendedProps.location) {
-    blocks.push(`Location:: ${extendedProps.location}`);
-  }
-
-  if (outlookEventData.attendees && outlookEventData.attendees.length > 0) {
-    const attendeesList = outlookEventData.attendees
-      .map((attendee) => {
-        const emailAddr = attendee.emailAddress || {};
-        const displayName = emailAddr.name || emailAddr.address;
-        return emailAddr.name
-          ? `[[${emailAddr.name}]]`
-          : `[[${emailAddr.address}]]`;
-      })
-      .join(", ");
-    blocks.push(`Attendees:: ${attendeesList}`);
-  }
-
-  return blocks;
+  return parseCalMetadataToBlocks({
+    location: extendedProps.location,
+    attendees: outlookEventData.attendees,
+    getAttendeeName: (attendee) => {
+      const emailAddr = attendee.emailAddress || {};
+      return emailAddr.name || emailAddr.address;
+    },
+  });
 };
 
 /**

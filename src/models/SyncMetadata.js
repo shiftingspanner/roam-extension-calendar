@@ -1,56 +1,25 @@
 /**
- * SyncMetadata - Handles sync metadata storage in extension storage
+ * SyncMetadata - Google Calendar sync metadata storage
  *
- * Sync metadata is stored in extension storage, NOT in Roam blocks.
  * Maps Roam block UIDs to their corresponding GCal event IDs.
+ * Delegates core CRUD logic to the shared CalendarSyncMetadata module.
  */
 
-import { extensionStorage } from "..";
-import { removeTagsFromBlock, isExistingNode } from "../util/roamApi";
 import { getConnectedCalendars } from "../services/googleCalendarService";
+import {
+  createSyncMetadataModule,
+  SyncStatus as SharedSyncStatus,
+  determineSyncStatus as sharedDetermineSyncStatus,
+} from "./CalendarSyncMetadata";
 
-const STORAGE_KEY = "gcal-sync-metadata";
-
-// In-memory cache of sync metadata
-let syncMetadataCache = null;
-
-/**
- * Get all trigger tags from all connected calendars
- * @returns {string[]} Array of all trigger tags (including displayNames)
- */
-const getAllTriggerTags = () => {
-  const calendars = getConnectedCalendars();
-  const allTags = [];
-
-  for (const calendar of calendars) {
-    // Add display name as a tag (used as primary tag)
-    if (calendar.displayName) {
-      allTags.push(calendar.displayName);
-    }
-    // Add all trigger tag aliases
-    if (calendar.triggerTags && calendar.triggerTags.length > 0) {
-      allTags.push(...calendar.triggerTags);
-    }
-  }
-
-  // Return unique tags
-  return [...new Set(allTags)];
-};
-
-/**
- * Remove all calendar trigger tags from a Roam block
- * @param {string} roamUid - Roam block UID
- */
-const removeTriggerTagsFromBlock = (roamUid) => {
-  if (!isExistingNode(roamUid)) {
-    return; // Block no longer exists
-  }
-
-  const allTriggerTags = getAllTriggerTags();
-  if (allTriggerTags.length > 0) {
-    removeTagsFromBlock(roamUid, allTriggerTags);
-  }
-};
+// Create provider-specific module using shared base
+const gcalMetadata = createSyncMetadataModule({
+  storageKey: "gcal-sync-metadata",
+  logPrefix: "[SyncMetadata]",
+  getConnectedCalendars,
+  externalIdField: "gCalId",
+  calendarIdField: "gCalCalendarId",
+});
 
 /**
  * Sync metadata structure for a single event
@@ -62,9 +31,9 @@ export const createSyncMetadata = ({
   gCalUpdated = null,
   roamUpdated = null,
   lastSync = Date.now(),
-  eventEndDate = null, // ISO date string (YYYY-MM-DD) for cleanup purposes
-  isTodo = false, // Whether the Roam block has TODO status (preserved during cleanup)
-  hadOriginalTimeRange = false, // Whether the original Roam event had a time range (e.g., "13:00-14:00") or just start time (e.g., "13:00")
+  eventEndDate = null,
+  isTodo = false,
+  hadOriginalTimeRange = false,
 }) => ({
   gCalId,
   gCalCalendarId,
@@ -78,334 +47,37 @@ export const createSyncMetadata = ({
 });
 
 /**
- * Load all sync metadata from storage
- */
-export const loadSyncMetadata = () => {
-  if (syncMetadataCache !== null) {
-    return syncMetadataCache;
-  }
-
-  try {
-    const stored = extensionStorage.get(STORAGE_KEY);
-    // Parse from JSON if it's a string, otherwise use as-is for backward compatibility
-    if (typeof stored === 'string') {
-      syncMetadataCache = JSON.parse(stored);
-    } else {
-      syncMetadataCache = stored || {};
-    }
-    console.log(`[SyncMetadata] Loaded ${Object.keys(syncMetadataCache).length} entries from storage`);
-    return syncMetadataCache;
-  } catch (error) {
-    console.error("Failed to load sync metadata:", error);
-    syncMetadataCache = {};
-    return syncMetadataCache;
-  }
-};
-
-/**
- * Save all sync metadata to storage
- */
-const persistSyncMetadata = () => {
-  try {
-    // Serialize to JSON to ensure all fields are properly saved
-    const serialized = JSON.stringify(syncMetadataCache);
-    extensionStorage.set(STORAGE_KEY, serialized);
-    console.log(`[SyncMetadata] Persisted ${Object.keys(syncMetadataCache).length} entries`);
-  } catch (error) {
-    console.error("Failed to persist sync metadata:", error);
-  }
-};
-
-/**
- * Get sync metadata for a specific Roam block
- * @param {string} roamUid - Roam block UID
- * @returns {object|null} Sync metadata or null if not found
- */
-export const getSyncMetadata = (roamUid) => {
-  const allMetadata = loadSyncMetadata();
-  return allMetadata[roamUid] || null;
-};
-
-/**
- * Get Roam UID by GCal event ID
- * @param {string} gCalId - Google Calendar event ID
- * @returns {string|null} Roam block UID or null if not found
- */
-export const getRoamUidByGCalId = (gCalId) => {
-  const allMetadata = loadSyncMetadata();
-  for (const [roamUid, metadata] of Object.entries(allMetadata)) {
-    if (metadata.gCalId === gCalId) {
-      return roamUid;
-    }
-  }
-  return null;
-};
-
-/**
- * Save sync metadata for a Roam block
- * @param {string} roamUid - Roam block UID
- * @param {object} metadata - Sync metadata
- */
-export const saveSyncMetadata = async (roamUid, metadata) => {
-  loadSyncMetadata(); // Ensure cache is loaded
-  syncMetadataCache[roamUid] = metadata;
-  persistSyncMetadata();
-  return roamUid;
-};
-
-/**
- * Update specific fields in sync metadata
- * @param {string} roamUid - Roam block UID
- * @param {object} updates - Fields to update
- */
-export const updateSyncMetadata = async (roamUid, updates) => {
-  const existing = getSyncMetadata(roamUid);
-
-  if (existing) {
-    const updatedMetadata = { ...existing, ...updates };
-    await saveSyncMetadata(roamUid, updatedMetadata);
-    return updatedMetadata;
-  }
-
-  return null;
-};
-
-/**
- * Delete sync metadata for a Roam block
- * @param {string} roamUid - Roam block UID
- */
-export const deleteSyncMetadata = async (roamUid) => {
-  loadSyncMetadata();
-
-  if (syncMetadataCache[roamUid]) {
-    delete syncMetadataCache[roamUid];
-    persistSyncMetadata();
-    return true;
-  }
-
-  return false;
-};
-
-/**
- * Check if a Roam block is synced with GCal
- * @param {string} roamUid - Roam block UID
- */
-export const isSynced = (roamUid) => {
-  return getSyncMetadata(roamUid) !== null;
-};
-
-/**
- * Get the Google Calendar ID from a Roam block's metadata
- * @param {string} roamUid - Roam block UID
- */
-export const getGCalIdFromEvent = (roamUid) => {
-  const metadata = getSyncMetadata(roamUid);
-  return metadata ? metadata.gCalId : null;
-};
-
-/**
- * Get all synced events for a specific calendar
- * @param {string} calendarId - Google Calendar ID
- */
-export const getSyncedEventsForCalendar = (calendarId) => {
-  const allMetadata = loadSyncMetadata();
-  const result = {};
-
-  for (const [roamUid, metadata] of Object.entries(allMetadata)) {
-    if (metadata.gCalCalendarId === calendarId) {
-      result[roamUid] = metadata;
-    }
-  }
-
-  return result;
-};
-
-/**
- * Clear all sync metadata (useful for disconnecting/reinitializing)
- * Also removes trigger tags from all synced blocks to prevent auto-resync.
- */
-export const clearAllSyncMetadata = () => {
-  loadSyncMetadata();
-
-  // Remove trigger tags from all synced blocks before clearing metadata
-  for (const roamUid of Object.keys(syncMetadataCache)) {
-    removeTriggerTagsFromBlock(roamUid);
-  }
-
-  syncMetadataCache = {};
-  persistSyncMetadata();
-  console.log(`[SyncMetadata] Cleared all sync metadata and removed trigger tags`);
-};
-
-/**
- * Sync status types
+ * Sync status types (includes GCal-specific GCAL_ONLY)
  */
 export const SyncStatus = {
-  SYNCED: "synced",
-  PENDING: "pending",
-  CONFLICT: "conflict",
-  LOCAL_ONLY: "local-only",
+  ...SharedSyncStatus,
   GCAL_ONLY: "gcal-only",
 };
 
 /**
- * Determine sync status by comparing timestamps
+ * Determine sync status by comparing timestamps (GCal-compatible wrapper)
  */
 export const determineSyncStatus = (metadata, gCalEvent) => {
-  if (!metadata) {
-    return SyncStatus.LOCAL_ONLY;
-  }
-
-  if (!gCalEvent) {
-    // GCal event might have been deleted
-    return SyncStatus.LOCAL_ONLY;
-  }
-
+  if (!metadata) return SyncStatus.LOCAL_ONLY;
+  if (!gCalEvent) return SyncStatus.LOCAL_ONLY;
   const gCalUpdated = new Date(gCalEvent.updated).getTime();
-  const roamUpdated = metadata.roamUpdated || metadata.lastSync;
-
-  // Both modified since last sync
-  if (gCalUpdated > metadata.lastSync && roamUpdated > metadata.lastSync) {
-    return SyncStatus.CONFLICT;
-  }
-
-  // GCal is newer
-  if (gCalUpdated > roamUpdated) {
-    return SyncStatus.PENDING; // Needs update from GCal
-  }
-
-  // Roam is newer
-  if (roamUpdated > gCalUpdated) {
-    return SyncStatus.PENDING; // Needs update to GCal
-  }
-
-  return SyncStatus.SYNCED;
+  return sharedDetermineSyncStatus(metadata, gCalUpdated);
 };
 
-/**
- * Get storage statistics for sync metadata
- * @returns {object} { eventCount, todoCount, estimatedBytes }
- */
-export const getStorageStats = () => {
-  const allMetadata = loadSyncMetadata();
-  const entries = Object.entries(allMetadata);
-
-  let todoCount = 0;
-  for (const [, metadata] of entries) {
-    if (metadata.isTodo) {
-      todoCount++;
-    }
-  }
-
-  // Estimate ~200 bytes per entry (JSON serialized)
-  const estimatedBytes = entries.length * 200;
-
-  return {
-    eventCount: entries.length,
-    todoCount,
-    estimatedBytes,
-  };
-};
-
-/**
- * Cleanup old sync metadata for past events
- * Removes metadata for events that ended more than N days ago,
- * unless the event still has TODO status.
- * Also removes trigger tags from blocks to prevent auto-resync.
- * @param {number} daysThreshold - Days after which to cleanup (default: 90 days / ~3 months)
- * @returns {object} { removedCount, keptTodoCount }
- */
-export const cleanupOldMetadata = (daysThreshold = 90) => {
-  loadSyncMetadata();
-
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const thresholdDate = new Date(today.getTime() - daysThreshold * 24 * 60 * 60 * 1000);
-
-  let removedCount = 0;
-  let keptTodoCount = 0;
-  const toRemove = [];
-
-  for (const [roamUid, metadata] of Object.entries(syncMetadataCache)) {
-    // Skip if no end date stored (legacy entry, can't determine age)
-    if (!metadata.eventEndDate) {
-      continue;
-    }
-
-    const endDate = new Date(metadata.eventEndDate);
-
-    // Check if event ended before threshold
-    if (endDate < thresholdDate) {
-      // Keep if it's still a TODO
-      if (metadata.isTodo) {
-        keptTodoCount++;
-        continue;
-      }
-
-      toRemove.push(roamUid);
-    }
-  }
-
-  // Remove old entries and their trigger tags
-  for (const roamUid of toRemove) {
-    // Remove trigger tags from block to prevent auto-resync
-    removeTriggerTagsFromBlock(roamUid);
-    delete syncMetadataCache[roamUid];
-    removedCount++;
-  }
-
-  if (removedCount > 0) {
-    persistSyncMetadata();
-    console.log(`[SyncMetadata] Cleaned up ${removedCount} old entries, kept ${keptTodoCount} TODOs`);
-  }
-
-  return { removedCount, keptTodoCount };
-};
-
-/**
- * Cleanup ALL past events (manual cleanup)
- * Removes metadata for all events that have ended, regardless of TODO status.
- * Also removes trigger tags from blocks to prevent auto-resync.
- * @returns {object} { removedCount }
- */
-export const cleanupAllPastMetadata = () => {
-  loadSyncMetadata();
-
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-
-  let removedCount = 0;
-  const toRemove = [];
-
-  for (const [roamUid, metadata] of Object.entries(syncMetadataCache)) {
-    // Skip if no end date stored
-    if (!metadata.eventEndDate) {
-      continue;
-    }
-
-    const endDate = new Date(metadata.eventEndDate);
-
-    // Remove if event ended before today
-    if (endDate < today) {
-      toRemove.push(roamUid);
-    }
-  }
-
-  // Remove entries and their trigger tags
-  for (const roamUid of toRemove) {
-    // Remove trigger tags from block to prevent auto-resync
-    removeTriggerTagsFromBlock(roamUid);
-    delete syncMetadataCache[roamUid];
-    removedCount++;
-  }
-
-  if (removedCount > 0) {
-    persistSyncMetadata();
-    console.log(`[SyncMetadata] Removed ${removedCount} past event entries`);
-  }
-
-  return { removedCount };
-};
+// Export CRUD operations via shared module
+export const loadSyncMetadata = gcalMetadata.loadMetadata;
+export const getSyncMetadata = gcalMetadata.getMetadata;
+export const getRoamUidByGCalId = gcalMetadata.getRoamUidByExternalId;
+export const saveSyncMetadata = gcalMetadata.saveMetadata;
+export const updateSyncMetadata = gcalMetadata.updateMetadata;
+export const deleteSyncMetadata = gcalMetadata.deleteMetadata;
+export const isSynced = gcalMetadata.isSynced;
+export const getGCalIdFromEvent = gcalMetadata.getExternalIdFromEvent;
+export const getSyncedEventsForCalendar = gcalMetadata.getSyncedEventsForCalendar;
+export const clearAllSyncMetadata = gcalMetadata.clearAllMetadata;
+export const getStorageStats = gcalMetadata.getStorageStats;
+export const cleanupOldMetadata = gcalMetadata.cleanupOldMetadata;
+export const cleanupAllPastMetadata = gcalMetadata.cleanupAllPastMetadata;
 
 export default {
   createSyncMetadata,
