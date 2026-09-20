@@ -29,6 +29,13 @@ export class EventTag {
     gTaskListIds = [],
     // For main "Google Tasks" tag: task lists disabled by user in popover
     disabledTaskListIds = [],
+    // Outlook Calendar specific properties
+    outlookCalendarId = null,
+    isOutlookTag = false,
+    // For main "Outlook calendar" tag: list of grouped calendar IDs
+    outlookCalendarIds = [],
+    // For main "Outlook calendar" tag: calendars disabled by user in popover
+    disabledOutlookCalendarIds = [],
   }) {
     this.name = name;
     this.pages = pages.length ? pages : [name];
@@ -51,6 +58,12 @@ export class EventTag {
     // For main "Google Tasks" tag
     this.gTaskListIds = gTaskListIds;
     this.disabledTaskListIds = disabledTaskListIds;
+    // Outlook Calendar properties
+    this.outlookCalendarId = outlookCalendarId;
+    this.isOutlookTag = isOutlookTag;
+    // For main "Outlook calendar" tag
+    this.outlookCalendarIds = outlookCalendarIds;
+    this.disabledOutlookCalendarIds = disabledOutlookCalendarIds;
   }
   setColor(color) {
     this.color = color;
@@ -126,4 +139,18 @@ export function getTagByGTaskListId(taskListId) {
  */
 export function getGTaskTags() {
   return mapOfTags.filter((tag) => tag.isGTaskTag);
+}
+
+/**
+ * Find a tag by its associated Outlook Calendar ID
+ */
+export function getTagByOutlookCalendarId(calendarId) {
+  return mapOfTags.find((tag) => tag.outlookCalendarId === calendarId);
+}
+
+/**
+ * Get all tags that are associated with Outlook Calendar
+ */
+export function getOutlookTags() {
+  return mapOfTags.filter((tag) => tag.isOutlookTag);
 }

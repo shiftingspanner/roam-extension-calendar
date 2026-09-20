@@ -11,6 +11,7 @@ import {
   connectObservers,
   disconnectObserver,
   displayGCalConfigDialog,
+  displayOutlookConfigDialog,
   handleRightClickOnCalendarBtn,
   removeListeners,
 } from "./util/roamDom";
@@ -34,6 +35,19 @@ import {
   syncBlockToDefaultCalendar,
   showSyncResultToast,
 } from "./services/syncService";
+import {
+  initOutlookCalendarService,
+  getOutlookConnectedCalendars,
+  isOutlookAuthenticated,
+  stopOutlookTokenRefreshMonitoring,
+  cleanupOutlookEventListeners,
+} from "./services/outlookCalendarService";
+import {
+  syncBlockToDefaultOutlookCalendar,
+  showOutlookSyncResultToast,
+} from "./services/outlookSyncService";
+import { cleanupOldOutlookMetadata } from "./models/OutlookSyncMetadata";
+import { initializeCalendarProviderTags } from "./util/calendarTagInit";
 
 export let mapOfTags = [];
 export let extensionStorage;
@@ -68,6 +82,19 @@ const panelConfig = {
           displayGCalConfigDialog();
         },
         content: "Configure Google Calendar",
+      },
+    },
+    {
+      id: "outlookSettings",
+      name: "Outlook Calendar integration",
+      description:
+        "Synchronize events from Microsoft Outlook Calendar",
+      action: {
+        type: "button",
+        onClick: (evt) => {
+          displayOutlookConfigDialog();
+        },
+        content: "Configure Outlook Calendar",
       },
     },
     {
@@ -410,6 +437,13 @@ const initializeMapOfTags = () => {
       ...getStoredTagInfos("Google calendar"),
     })
   );
+  mapOfTags.push(
+    new EventTag({
+      name: "Outlook calendar",
+      color: "#0078d4",
+      ...getStoredTagInfos("Outlook calendar"),
+    })
+  );
   const userTags = extensionStorage.get("userTags");
   if (notNullOrCommaRegex.test(userTags)) updageUserTags(userTags);
   const calendarTagName = extensionStorage.get("calendarTag");
@@ -490,145 +524,20 @@ const setTimeFormat = (example) => {
   }
 };
 
-// Initialize EventTags for connected Google Calendars
-// - Calendars with showAsSeparateTag: false are grouped under the main "Google Calendar" tag
-// - Calendars with showAsSeparateTag: true get their own EventTag with displayName as the tag name
-// Optional: pass calendars directly to avoid potential async storage timing issues
+// Initialize EventTags for connected Google Calendars.
+// Delegates to shared initializeCalendarProviderTags.
 export const initializeGCalTags = (calendarsOverride = null) => {
-  const connectedCalendars = calendarsOverride || getConnectedCalendars();
-  if (!connectedCalendars || !connectedCalendars.length) return;
-
-  // Get the main "Google Calendar" tag
-  const mainGCalTag = getTagFromName("Google calendar");
-  if (!mainGCalTag) {
-    console.warn("Main 'Google calendar' tag not found");
-    return;
-  }
-
-  // First, remove any GCal separate tags that are no longer configured as separate
-  const separateCalendarNames = connectedCalendars
-    .filter((cal) => cal.showAsSeparateTag)
-    .map((cal) => cal.displayName || cal.name);
-
-  // Remove GCal tags that are no longer separate (but keep non-GCal tags)
-  for (let i = mapOfTags.length - 1; i >= 0; i--) {
-    const tag = mapOfTags[i];
-    if (
-      tag.isGCalTag &&
-      tag.gCalCalendarId &&
-      !separateCalendarNames.includes(tag.name)
-    ) {
-      mapOfTags.splice(i, 1);
-    }
-  }
-
-  // Initialize arrays for the main tag
-  mainGCalTag.gCalCalendarIds = [];
-  mainGCalTag.disabledCalendarIds = [];
-
-  for (const calendarConfig of connectedCalendars) {
-    if (calendarConfig.showAsSeparateTag) {
-      // Calendar has its own separate tag
-      const tagName = calendarConfig.displayName || calendarConfig.name;
-      let existingTag = getTagFromName(tagName);
-
-      if (!existingTag) {
-        // Create new EventTag for this separate GCal calendar with trigger tags as pages
-        const pages = [tagName];
-        if (
-          calendarConfig.triggerTags &&
-          calendarConfig.triggerTags.length > 0
-        ) {
-          pages.push(...calendarConfig.triggerTags);
-        }
-
-        const gcalTag = new EventTag({
-          name: tagName,
-          color: Colors.GRAY3, // Default color, will be updated from fc-tags-info
-          ...getStoredTagInfos(tagName),
-          pages: pages,
-          isGCalTag: true,
-          gCalCalendarId: calendarConfig.id,
-          isToDisplay: true,
-          isToDisplayInSb: true,
-        });
-        mapOfTags.push(gcalTag);
-        console.log(
-          `Created separate EventTag for GCal calendar: ${tagName} with pages:`,
-          pages
-        );
-      } else {
-        // Update existing tag with GCal properties and add trigger tags as pages
-        existingTag.gCalCalendarId = calendarConfig.id;
-        existingTag.isGCalTag = true;
-
-        // Add trigger tags to pages if not already present
-        if (
-          calendarConfig.triggerTags &&
-          calendarConfig.triggerTags.length > 0
-        ) {
-          const currentPages = existingTag.pages || [existingTag.name];
-          const newPages = [
-            ...new Set([...currentPages, ...calendarConfig.triggerTags]),
-          ];
-          existingTag.updatePages(newPages);
-        }
-
-        // console.log(
-        //   `Updated separate EventTag for GCal calendar: ${tagName} with pages:`,
-        //   existingTag.pages
-        // );
-      }
-    } else {
-      // Calendar is grouped under main "Google Calendar" tag
-      mainGCalTag.gCalCalendarIds.push(calendarConfig.id);
-
-      // Track disabled calendars
-      if (!calendarConfig.syncEnabled) {
-        mainGCalTag.disabledCalendarIds.push(calendarConfig.id);
-      }
-
-      // Add trigger tags as pages/aliases to the main "Google calendar" tag
-      if (calendarConfig.triggerTags && calendarConfig.triggerTags.length > 0) {
-        const currentPages = mainGCalTag.pages || ["Google calendar"];
-        const newPages = [
-          ...new Set([...currentPages, ...calendarConfig.triggerTags]),
-        ];
-        mainGCalTag.updatePages(newPages);
-        // console.log(
-        //   `Added trigger tags to main GCal tag. Pages:`,
-        //   mainGCalTag.pages
-        // );
-      }
-    }
-  }
-
-  // If "Use Original Colors" is enabled, apply calendar colors to tags on initialization
-  if (getUseOriginalColors()) {
-    let defaultCalendarColor = null;
-
-    for (const calendarConfig of connectedCalendars) {
-      if (!calendarConfig.syncEnabled || !calendarConfig.backgroundColor)
-        continue;
-
-      if (calendarConfig.showAsSeparateTag) {
-        // Update the separate tag's color
-        const tagName = calendarConfig.displayName || calendarConfig.name;
-        const tag = getTagFromName(tagName);
-        if (tag) {
-          tag.setColor(calendarConfig.backgroundColor);
-        }
-      } else if (calendarConfig.isDefault) {
-        // Store the default calendar's color for the main tag
-        defaultCalendarColor = calendarConfig.backgroundColor;
-      }
-    }
-
-    // Apply the default calendar's color to the main "Google calendar" tag
-    if (defaultCalendarColor && mainGCalTag) {
-      mainGCalTag.setColor(defaultCalendarColor);
-    }
-  }
+  initializeCalendarProviderTags({
+    calendarsOverride,
+    getConnectedCalendars,
+    mainTagName: "Google calendar",
+    providerPrefix: "gCal",
+    defaultColor: Colors.GRAY3,
+    mapOfTags,
+    getStoredTagInfos,
+    applyOriginalColors: true,
+    getUseOriginalColors,
+  });
 };
 
 // Initialize EventTags for connected Google Task Lists
@@ -741,6 +650,20 @@ export const initializeGTaskTags = (taskListsOverride = null) => {
       }
     }
   }
+};
+
+// Initialize EventTags for connected Outlook Calendars.
+// Delegates to shared initializeCalendarProviderTags.
+export const initializeOutlookTags = (calendarsOverride = null) => {
+  initializeCalendarProviderTags({
+    calendarsOverride,
+    getConnectedCalendars: getOutlookConnectedCalendars,
+    mainTagName: "Outlook calendar",
+    providerPrefix: "outlook",
+    defaultColor: "#0078d4",
+    mapOfTags,
+    getStoredTagInfos,
+  });
 };
 
 // clean calendarTag data, solve conflict from v.4 or from quit just after setting change
@@ -875,6 +798,48 @@ export default {
       },
     });
 
+    // Add command palette command for syncing to Outlook Calendar
+    extensionAPI.ui.commandPalette.addCommand({
+      label: "Full Calendar: Sync to default Outlook calendar",
+      callback: async () => {
+        const blockUid =
+          window.roamAlphaAPI.ui.getFocusedBlock()?.["block-uid"];
+        if (!blockUid) {
+          const toaster = Toaster.create({ position: Position.TOP });
+          toaster.show({
+            message: "No block is currently focused",
+            intent: Intent.WARNING,
+            icon: "warning-sign",
+            timeout: 3000,
+          });
+          return;
+        }
+
+        const result = await syncBlockToDefaultOutlookCalendar(blockUid);
+        showOutlookSyncResultToast(result, blockUid);
+      },
+    });
+
+    // Add block context menu command for syncing to Outlook Calendar
+    window.roamAlphaAPI.ui.blockContextMenu.addCommand({
+      label: "Full Calendar: Sync to default Outlook calendar",
+      "display-conditional": () => {
+        const calendars = getOutlookConnectedCalendars();
+        return (
+          calendars &&
+          calendars.length > 0 &&
+          calendars.some(
+            (cal) => cal.syncEnabled && cal.syncDirection !== "import"
+          )
+        );
+      },
+      callback: async (e) => {
+        const blockUid = e["block-uid"];
+        const result = await syncBlockToDefaultOutlookCalendar(blockUid);
+        showOutlookSyncResultToast(result, blockUid);
+      },
+    });
+
     initializeMapOfTags();
 
     if (storedTagsInfo && storedTagsInfo.length)
@@ -927,6 +892,29 @@ export default {
         console.error("Google Calendar initialization error:", error);
       });
 
+    // Initialize Outlook Calendar service (attempt silent auth if previously connected)
+    initOutlookCalendarService()
+      .then((authenticated) => {
+        if (authenticated) {
+          console.log("Outlook Calendar: Restored previous session");
+          initializeOutlookTags();
+
+          const outlookCleanupResult = cleanupOldOutlookMetadata();
+          if (outlookCleanupResult.removedCount > 0) {
+            console.log(
+              `Outlook Calendar: Cleaned up ${outlookCleanupResult.removedCount} old sync entries`
+            );
+          }
+        } else {
+          console.log(
+            "Outlook Calendar: Not authenticated (connect via Outlook Calendar settings)"
+          );
+        }
+      })
+      .catch((error) => {
+        console.error("Outlook Calendar initialization error:", error);
+      });
+
     console.log("Full Calendar extension loaded.");
     //return;
   },
@@ -941,6 +929,10 @@ export default {
     } = require("./services/googleCalendarService");
     stopTokenRefreshMonitoring();
     cleanupEventListeners();
+
+    // Stop Outlook token refresh monitoring and cleanup
+    stopOutlookTokenRefreshMonitoring();
+    cleanupOutlookEventListeners();
 
     // Properly unmount all Calendar instances to prevent zombie components
     const allCalendarInstances = document.querySelectorAll(

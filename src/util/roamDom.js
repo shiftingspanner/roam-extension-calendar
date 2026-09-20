@@ -1,5 +1,6 @@
 import { renderApp, unmountApp } from "../components/App";
 import GCalConfigDialog from "../components/GCalConfigDialog";
+import OutlookConfigDialog from "../components/OutlookConfigDialog";
 
 let runningCount = 0;
 
@@ -256,6 +257,49 @@ export const displayGCalConfigDialog = () => {
   ReactDOM.render(
     <ErrorBoundary componentName="Google Calendar Settings">
       <GCalConfigDialog
+        isOpen={true}
+        onClose={handleDialogClose}
+      />
+    </ErrorBoundary>,
+    container
+  );
+};
+
+export const displayOutlookConfigDialog = () => {
+  const targetElt = document.querySelector(".roam-body");
+  const previousContainer =
+    targetElt &&
+    targetElt.parentElement.querySelector(".fc-outlook-config-dialog-container");
+  let container;
+  if (previousContainer) {
+    ReactDOM.unmountComponentAtNode(previousContainer);
+  }
+  container = document.createElement("div");
+  container.classList.add("fc-outlook-config-dialog-container");
+  targetElt.appendChild(container);
+
+  function unmountOutlookConfigDialog(options = {}) {
+    const node = document.querySelector(".fc-outlook-config-dialog-container");
+    if (node) {
+      ReactDOM.unmountComponentAtNode(node);
+      node.remove();
+    }
+
+    if (options?.shouldRemountCalendar) {
+      const { notifyCalendarConfigChanged } = require("../contexts/CalendarConfigContext");
+      notifyCalendarConfigChanged();
+    }
+  }
+
+  const handleDialogClose = (options) => {
+    unmountOutlookConfigDialog(options);
+  };
+
+  const ErrorBoundary = require("../components/ErrorBoundary").default;
+
+  ReactDOM.render(
+    <ErrorBoundary componentName="Outlook Calendar Settings">
+      <OutlookConfigDialog
         isOpen={true}
         onClose={handleDialogClose}
       />

@@ -1972,3 +1972,159 @@
 .fc-sync-dialog-content div > svg {
   width: 14px;
 }
+
+/*****************************/
+/* OUTLOOK CALENDAR EVENTS   */
+/*****************************/
+
+/* Outlook event visual distinction */
+.fc-event-outlook {
+  border-left: 3px solid rgba(0, 120, 212, 0.6) !important;
+}
+
+/* Outlook event details popover */
+.fc-outlook-event-details {
+  min-width: 250px;
+  max-width: 350px;
+  padding: 5px 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.fc-outlook-event-details h4 {
+  margin: 0 0 10px 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/* Outlook event info component */
+.fc-outlook-event-info {
+  margin: 4px 0;
+}
+
+.fc-outlook-calendar-source {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #5c7080;
+  padding: 6px 0;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.fc-outlook-calendar-source-clickable {
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.fc-outlook-calendar-source-clickable:hover {
+  opacity: 0.8;
+}
+
+.fc-outlook-location,
+.fc-outlook-attendees {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: #5c7080;
+}
+
+.fc-outlook-location .bp3-icon,
+.fc-outlook-attendees .bp3-icon {
+  opacity: 0.7;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.fc-outlook-description {
+  margin: 10px 0;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 4px;
+  font-size: 12px;
+  max-height: 120px;
+  overflow-y: auto;
+  line-height: 1.4;
+}
+
+.fc-outlook-description p {
+  margin: 0 0 6px 0;
+  word-break: break-word;
+}
+
+.fc-outlook-description p:last-child {
+  margin-bottom: 0;
+}
+
+.fc-outlook-description a {
+  color: #106ba3;
+  text-decoration: underline;
+}
+
+.fc-outlook-description a:hover {
+  color: #0e5a8a;
+}
+
+.fc-outlook-weblink {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.fc-outlook-weblink a {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #0078d4;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.fc-outlook-weblink a:hover {
+  color: #005a9e;
+  text-decoration: underline;
+}
+
+/* Outlook calendar icon styles */
+.fc-outlook-icon-inline {
+  width: 16px !important;
+  height: 16px !important;
+  max-width: 16px !important;
+  max-height: 16px !important;
+  margin-right: 4px;
+  vertical-align: middle;
+  opacity: 0.85;
+  transform: translateY(-1px);
+}
+
+.fc-outlook-icon-small {
+  width: 14px !important;
+  height: 14px !important;
+  max-width: 14px !important;
+  max-height: 14px !important;
+  vertical-align: middle;
+  opacity: 0.9;
+}
+
+/* Outlook config dialog */
+.fc-outlook-config-dialog {
+  height: 95vh;
+  min-width: 400px;
+}
+
+.fc-outlook-config-dialog .bp3-dialog-body {
+  overflow: auto;
+  margin: 10px;
+}
+
+.fc-outlook-config-dialog .bp3-dialog-body .bp3-card {
+  padding: 10px;
+}
+
+.fc-outlook-config-dialog .bp3-dialog-body .bp3-card .bp3-form-group {
+  margin: 0;
+}
